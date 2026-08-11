@@ -43,6 +43,54 @@ function timeAgo(ts) {
   const d = Math.floor(h / 24);
   return d + 'd ago';
 }
+function csvEscape(val) {
+  const s = String(val == null ? '' : val);
+  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function csvRow(arr) {
+  return arr.map(csvEscape).join(',');
+}
+
+function buildCSV(state) {
+  const lines = [];
+
+  lines.push('GOALS');
+  lines.push(csvRow(['Title', 'Category', 'Progress %', 'Deadline', 'Status', 'Why']));
+  state.goals.forEach(g => {
+    const cat = GOAL_CATEGORIES.find(c => c.key === (g.category || 'growth'));
+    lines.push(csvRow([g.title, cat ? cat.label : (g.category || ''), g.progress, g.deadline || '', g.progress >= 100 ? 'Completed' : 'Active', g.why || '']));
+  });
+  lines.push('');
+
+  lines.push('ACTIONS');
+  lines.push(csvRow(['Title', 'Type', 'Linked Goal', 'Detail', 'Why']));
+  state.actions.forEach(a => {
+    const goal = state.goals.find(g => g.id === a.goalId);
+    let detail = '';
+    if (a.kind === 'recurring') {
+      const stats = recurringStats(a, goal);
+      detail = `${stats.rate}% \u00b7 ${stats.doneSoFar} done \u00b7 ${stats.missed} missed`;
+    } else if (a.kind === 'numeric') {
+      const stats = numericStats(a);
+      detail = `${formatNumeric(stats.current, a.unit)} / ${formatNumeric(stats.target, a.unit)}`;
+    } else {
+      detail = a.status || '';
+    }
+    lines.push(csvRow([a.title, a.kind || 'once', goal ? goal.title : '', detail, a.why || '']));
+  });
+  lines.push('');
+
+  lines.push('TO-DO');
+  lines.push(csvRow(['Title', 'Due Date', 'Done']));
+  (state.todos || []).forEach(t => {
+    lines.push(csvRow([t.title, t.dueDate || '', t.done ? 'Yes' : 'No']));
+  });
+
+  return lines.join('\r\n');
+}
+
 function buildReflectionText(state) {
   const i = state.identity, b = state.blueprint, s = state.system;
   const lines = [];
@@ -149,6 +197,7 @@ function dialSVG(pct, size = 72) {
 /* ---------------- Icons ---------------- */
 const ICONS = {
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1v-9"/></svg>',
+  today: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/><path d="M8.5 14l2 2 4-4"/></svg>',
   goals: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.8" fill="currentColor"/></svg>',
   blueprint: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l3 6 6 .9-4.5 4.2 1 6-5.5-3-5.5 3 1-6L3 9.9 9 9z"/></svg>',
   brain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 4a3 3 0 00-3 3v1a3 3 0 000 6v1a3 3 0 003 3M15 4a3 3 0 013 3v1a3 3 0 010 6v1a3 3 0 01-3 3M9 4v16M15 4v16"/></svg>',
@@ -157,7 +206,8 @@ const ICONS = {
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2m2 0v13a2 2 0 01-2 2H9a2 2 0 01-2-2V7"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 13l4 4L19 7"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>',
-  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>'
+  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>'
 };
 
 /* ---------------- Small render helpers ---------------- */
@@ -271,28 +321,45 @@ function isApplicableDay(action, date) {
   return days.includes(WEEKDAYS[date.getDay()]);
 }
 
-function countApplicableDaysInWindow(action, start, durationDays) {
+function resolveRecurringEnd(action, goal) {
+  if (action.endMode === 'goalDeadline') {
+    if (goal && goal.deadline) return new Date(goal.deadline + 'T00:00:00');
+    return null; // goal has no deadline set — treat as open-ended
+  }
+  if (action.endMode === 'custom' && action.endDate) {
+    return new Date(action.endDate + 'T00:00:00');
+  }
+  if (action.durationDays) {
+    const start = new Date((action.startDate || todayKey()) + 'T00:00:00');
+    const end = new Date(start);
+    end.setDate(end.getDate() + action.durationDays - 1);
+    return end;
+  }
+  return null;
+}
+
+function countApplicableDaysInRange(action, start, end) {
   let count = 0;
   const cursor = new Date(start);
-  for (let i = 0; i < durationDays; i++) {
+  while (cursor <= end) {
     if (isApplicableDay(action, cursor)) count++;
     cursor.setDate(cursor.getDate() + 1);
   }
   return count;
 }
 
-function recurringStats(action) {
+function recurringStats(action, goal) {
   const start = new Date((action.startDate || todayKey()) + 'T00:00:00');
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const log = action.log || {};
-  const hasDuration = !!action.durationDays;
-  const maxDays = action.durationDays || Infinity;
+  const end = resolveRecurringEnd(action, goal);
+
   const cursor = new Date(start);
-  let calendarDay = 0, elapsed = 0, done = 0;
+  let elapsed = 0, done = 0;
   const recent = [];
 
-  while (cursor < today && calendarDay < maxDays) {
+  while (cursor < today && (!end || cursor <= end)) {
     if (isApplicableDay(action, cursor)) {
       const key = dateKey(cursor);
       const wasDone = !!log[key];
@@ -300,53 +367,68 @@ function recurringStats(action) {
       if (wasDone) done++;
       recent.push({ date: key, done: wasDone });
     }
-    calendarDay++;
     cursor.setDate(cursor.getDate() + 1);
   }
 
-  const todayApplicable = calendarDay < maxDays && isApplicableDay(action, today);
+  const todayApplicable = (!end || today <= end) && isApplicableDay(action, today);
   const todayDone = !!log[todayKey()];
   const doneSoFar = done + (todayApplicable && todayDone ? 1 : 0);
   const trackedSoFar = elapsed + (todayApplicable ? 1 : 0);
+  const missed = elapsed - done;
 
-  let rate, totalTarget = null;
-  if (hasDuration) {
-    // Progress toward the FULL commitment (e.g. 90 days), not just what's
-    // happened so far — one tick out of 90 days is ~1%, not 100%.
-    totalTarget = countApplicableDaysInWindow(action, start, action.durationDays);
+  let rate, totalTarget = null, dayNumber = null, totalDaySpan = null;
+  if (end) {
+    // Progress toward the FULL commitment window, not just what's happened
+    // so far — one tick out of 90 days is ~1%, not 100%.
+    totalTarget = countApplicableDaysInRange(action, start, end);
     rate = totalTarget > 0 ? Math.round((doneSoFar / totalTarget) * 100) : 0;
+    totalDaySpan = Math.round((end - start) / 86400000) + 1;
+    dayNumber = Math.min(Math.round((today - start) / 86400000) + 1, totalDaySpan);
   } else {
     // Open-ended habit: rate is a consistency/attendance score instead.
     rate = trackedSoFar > 0 ? Math.round((doneSoFar / trackedSoFar) * 100) : 0;
   }
 
   return {
-    elapsed, done, missed: elapsed - done, rate,
+    elapsed, done, missed, rate,
     todayApplicable, todayDone,
     recent: recent.slice(-14),
-    dayNumber: calendarDay + 1,
-    maxDays: action.durationDays || null,
-    doneSoFar, totalTarget
+    doneSoFar, totalTarget,
+    dayNumber, totalDaySpan
   };
 }
 
-function actionContribution(action) {
-  if (action.kind === 'recurring') return recurringStats(action).rate;
+function numericStats(action) {
+  const ledger = action.ledger || [];
+  const current = ledger.reduce((sum, e) => sum + e.amount, 0);
+  const target = action.target || 0;
+  const pct = target > 0 ? Math.min(100, Math.max(0, Math.round((current / target) * 100))) : 0;
+  return { current, target, pct, ledger };
+}
+
+function formatNumeric(val, unit) {
+  const n = Math.round(val).toLocaleString('en-IN');
+  return unit === 'currency' ? `\u20b9${n}` : n;
+}
+
+function actionContribution(action, goal) {
+  if (action.kind === 'recurring') return recurringStats(action, goal).rate;
+  if (action.kind === 'numeric') return numericStats(action).pct;
   return action.status === 'Completed' ? 100 : 0;
 }
 
-function computeAutoProgress(goalId, actions) {
-  const linked = actions.filter(a => a.goalId === goalId);
+function computeAutoProgress(goal, actions) {
+  const linked = actions.filter(a => a.goalId === goal.id);
   if (!linked.length) return null;
-  const totalPct = linked.reduce((sum, a) => sum + actionContribution(a), 0);
+  const totalPct = linked.reduce((sum, a) => sum + actionContribution(a, goal), 0);
   const pct = Math.round(totalPct / linked.length);
-  const completedCount = linked.filter(a => a.kind !== 'recurring' && a.status === 'Completed').length;
+  const completedCount = linked.filter(a => a.kind !== 'recurring' && a.kind !== 'numeric' && a.status === 'Completed').length;
   return { pct, done: completedCount, total: linked.length };
 }
 
 function syncGoalProgress(state) {
   state.goals.forEach(g => {
-    const auto = computeAutoProgress(g.id, state.actions);
+    const auto = computeAutoProgress(g, state.actions);
     if (auto) g.progress = auto.pct;
     if (g.progress >= 100 && !g.completedAt) g.completedAt = Date.now();
     if (g.progress < 100 && g.completedAt) g.completedAt = null;
@@ -355,7 +437,7 @@ function syncGoalProgress(state) {
 
 function renderGoalCard(g, state) {
   const linked = state.actions.filter(a => a.goalId === g.id);
-  const auto = computeAutoProgress(g.id, state.actions);
+  const auto = computeAutoProgress(g, state.actions);
   const progress = auto ? auto.pct : g.progress;
   const isDone = progress >= 100;
   const dl = g.deadline ? deadlineInfo(g.deadline, progress) : null;
@@ -373,6 +455,15 @@ function renderGoalCard(g, state) {
           <button class="icon-btn danger" data-delete-goal="${g.id}" aria-label="Delete goal">${ICONS.trash}</button>
         </div>
       </div>
+      ${!isDone && dl && dl.overdue ? `
+        <div class="overdue-banner">
+          <span>Deadline passed \u2014 what happens now?</span>
+          <div class="overdue-banner-actions">
+            <button class="overdue-btn" data-edit-goal="${g.id}">Extend deadline</button>
+            <button class="overdue-btn" data-log-lesson="${g.id}">Log as lesson</button>
+          </div>
+        </div>
+      ` : ''}
       ${auto ? `
         <div class="progress-controls readonly">
           <div class="progress-track"><div class="progress-fill" style="width:${progress}%"></div></div>
@@ -390,7 +481,7 @@ function renderGoalCard(g, state) {
       `}
       ${isDone ? `<button class="add-list-item" data-reopen-goal="${g.id}" style="margin-top:12px">${ICONS.plus} Reopen this goal</button>` : ''}
       <div class="linked-actions">
-        ${linked.length ? linked.map(a => a.kind === 'recurring' ? renderRecurringActionRow(a) : renderOnceActionRow(a)).join('') : `<div class="empty-state small">No actions linked yet.</div>`}
+        ${linked.length ? linked.map(a => a.kind === 'recurring' ? renderRecurringActionRow(a, g) : a.kind === 'numeric' ? renderNumericActionRow(a) : renderOnceActionRow(a)).join('') : `<div class="empty-state small">No actions linked yet.</div>`}
       </div>
       <button class="add-action-link" data-add-action-to="${g.id}">+ Add action to this goal</button>
     </div>
@@ -413,11 +504,11 @@ function renderOnceActionRow(a) {
   `;
 }
 
-function renderRecurringActionRow(a) {
-  const stats = recurringStats(a);
-  const statText = stats.totalTarget
-    ? `${stats.doneSoFar}/${stats.totalTarget} days completed \u00b7 day ${Math.min(stats.dayNumber, stats.maxDays)}/${stats.maxDays}`
-    : `${stats.done}/${stats.elapsed} days shown up`;
+function renderRecurringActionRow(a, goal) {
+  const stats = recurringStats(a, goal);
+  const progressLine = stats.totalTarget
+    ? `Day ${stats.dayNumber} of ${stats.totalDaySpan} \u00b7 ${stats.doneSoFar}/${stats.totalTarget} days completed`
+    : `${stats.rate}% consistency so far`;
   return `
     <div class="linked-action recurring">
       <div class="linked-action-left">
@@ -431,11 +522,52 @@ function renderRecurringActionRow(a) {
       </div>
     </div>
     <div class="recurring-stats">
-      <span>${statText}</span>
+      <span class="stat-done">${stats.doneSoFar} done</span>
+      <span class="stat-sep">\u00b7</span>
+      <span class="stat-missed">${stats.missed} missed</span>
+      <span class="stat-sep">\u00b7</span>
+      <span>${progressLine}</span>
     </div>
     ${stats.recent.length ? `
       <div class="recurring-strip">
         ${stats.recent.map(r => `<span class="strip-dot ${r.done ? 'done' : 'missed'}"></span>`).join('')}
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderNumericActionRow(a) {
+  const stats = numericStats(a);
+  const recent = stats.ledger.slice(-4).slice().reverse();
+  return `
+    <div class="linked-action numeric">
+      <div class="linked-action-left">
+        <span>${escapeHtml(a.title)}</span>
+      </div>
+      <div class="linked-action-right">
+        <span class="status-pill recurring-pill">${stats.pct}%</span>
+        <button class="icon-btn sm" data-edit-action="${a.id}" aria-label="Edit action">${ICONS.edit}</button>
+        <button class="icon-btn sm danger" data-delete-action="${a.id}" aria-label="Delete action">${ICONS.trash}</button>
+      </div>
+    </div>
+    <div class="progress-controls readonly" style="margin-top:6px">
+      <div class="progress-track"><div class="progress-fill" style="width:${stats.pct}%"></div></div>
+    </div>
+    <div class="recurring-stats">
+      <span class="stat-done">${formatNumeric(stats.current, a.unit)}</span>
+      <span class="stat-sep">of</span>
+      <span>${formatNumeric(stats.target, a.unit)}</span>
+    </div>
+    <button class="add-list-item" data-add-entry="${a.id}" style="margin:8px 0">${ICONS.plus} Add entry</button>
+    ${recent.length ? `
+      <div class="ledger-history">
+        ${recent.map(e => `
+          <div class="ledger-row">
+            <span class="${e.amount < 0 ? 'ledger-neg' : 'ledger-pos'}">${e.amount >= 0 ? '+' : ''}${formatNumeric(e.amount, a.unit)}</span>
+            <span class="ledger-note">${escapeHtml(e.note || '')}</span>
+            <span class="ledger-date mono">${new Date(e.ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+          </div>
+        `).join('')}
       </div>
     ` : ''}
   `;
@@ -558,6 +690,150 @@ function renderBrain(state, activeCategory) {
   `;
 }
 
+function renderAnalytics(state) {
+  const activeGoals = state.goals.filter(g => g.progress < 100);
+  const completedGoals = state.goals.filter(g => g.progress >= 100);
+  const avgProgress = activeGoals.length ? Math.round(activeGoals.reduce((s, g) => s + g.progress, 0) / activeGoals.length) : 0;
+
+  const catRows = GOAL_CATEGORIES.map(cat => {
+    const goalsInCat = state.goals.filter(g => (g.category || 'growth') === cat.key);
+    const avg = goalsInCat.length ? Math.round(goalsInCat.reduce((s, g) => s + g.progress, 0) / goalsInCat.length) : 0;
+    return `<div class="analytics-row"><span>${escapeHtml(cat.label)}</span><span class="mono">${avg}% \u00b7 ${goalsInCat.length} goal${goalsInCat.length === 1 ? '' : 's'}</span></div>`;
+  }).join('');
+
+  const goalRows = state.goals.length ? state.goals.map(g => `
+    <div class="analytics-goal">
+      <div class="analytics-goal-top"><span class="${g.progress >= 100 ? 'strike' : ''}">${escapeHtml(g.title)}</span><span class="mono">${g.progress}%</span></div>
+      <div class="progress-track"><div class="progress-fill" style="width:${g.progress}%"></div></div>
+    </div>
+  `).join('') : `<div class="empty-state small">No goals yet.</div>`;
+
+  const recurringActions = state.actions.filter(a => a.kind === 'recurring');
+  const recurringRows = recurringActions.length ? recurringActions.map(a => {
+    const goal = state.goals.find(g => g.id === a.goalId);
+    const stats = recurringStats(a, goal);
+    return `<div class="analytics-row"><span>${escapeHtml(a.title)}</span><span class="mono">${stats.rate}% \u00b7 ${stats.doneSoFar} done \u00b7 ${stats.missed} missed</span></div>`;
+  }).join('') : `<div class="empty-state small">No recurring habits yet.</div>`;
+
+  const numericActions = state.actions.filter(a => a.kind === 'numeric');
+  const numericRows = numericActions.length ? numericActions.map(a => {
+    const stats = numericStats(a);
+    return `<div class="analytics-row"><span>${escapeHtml(a.title)}</span><span class="mono">${formatNumeric(stats.current, a.unit)} / ${formatNumeric(stats.target, a.unit)}</span></div>`;
+  }).join('') : `<div class="empty-state small">No financial/number goals yet.</div>`;
+
+  const changes = (state.meta && state.meta.recentChanges) || [];
+  const changeRows = changes.length ? changes.slice(0, 8).map(c => `<div class="change-row"><span>${escapeHtml(c.text)}</span><span class="mono change-time">${timeAgo(c.ts)}</span></div>`).join('') : `<div class="empty-state small">Nothing yet.</div>`;
+
+  return `
+    <div class="section-title" style="margin-top:6px">Overview</div>
+    <div class="card">
+      <div class="analytics-row"><span>Active goals</span><span class="mono">${activeGoals.length}</span></div>
+      <div class="analytics-row"><span>Completed goals</span><span class="mono">${completedGoals.length}</span></div>
+      <div class="analytics-row"><span>Average progress</span><span class="mono">${avgProgress}%</span></div>
+    </div>
+
+    <div class="section-title">By Category</div>
+    <div class="card">${catRows}</div>
+
+    <div class="section-title">All Goals</div>
+    <div class="card">${goalRows}</div>
+
+    <div class="section-title">Recurring Habits</div>
+    <div class="card">${recurringRows}</div>
+
+    <div class="section-title">Financial / Number Goals</div>
+    <div class="card">${numericRows}</div>
+
+    <div class="section-title">Recent Changes</div>
+    <div class="card">${changeRows}</div>
+  `;
+}
+
+function renderTodoRow(t) {
+  const overdue = t.dueDate && !t.done && t.dueDate < todayKey();
+  const dueLabel = t.dueDate ? formatDate(t.dueDate) : '';
+  return `
+    <div class="linked-action">
+      <div class="linked-action-left">
+        <button class="check-circle ${t.done ? 'done' : ''}" data-toggle-todo="${t.id}" aria-label="Toggle done">${t.done ? ICONS.check : ''}</button>
+        <span class="${t.done ? 'strike' : ''}">${escapeHtml(t.title)}</span>
+      </div>
+      <div class="linked-action-right">
+        ${dueLabel ? `<span class="mono todo-due ${overdue ? 'todo-overdue' : ''}">${dueLabel}</span>` : ''}
+        <button class="icon-btn sm" data-edit-todo="${t.id}" aria-label="Edit to-do">${ICONS.edit}</button>
+        <button class="icon-btn sm danger" data-delete-todo="${t.id}" aria-label="Delete to-do">${ICONS.trash}</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderToday(state) {
+  const today = todayKey();
+  const dateStr = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+
+  const recurringDue = state.actions
+    .filter(a => a.kind === 'recurring')
+    .map(a => ({ a, goal: state.goals.find(g => g.id === a.goalId), stats: recurringStats(a, state.goals.find(g => g.id === a.goalId)) }))
+    .filter(x => x.stats.todayApplicable);
+
+  const activeOnce = state.actions
+    .filter(a => a.kind === 'once' && a.status === 'Active')
+    .map(a => ({ a, goal: state.goals.find(g => g.id === a.goalId) }));
+
+  const dueTodayGoals = state.goals.filter(g => g.deadline === today && g.progress < 100);
+
+  const todos = state.todos || [];
+  const openTodos = todos.filter(t => !t.done);
+  const doneTodos = todos.filter(t => t.done);
+
+  return `
+    <div class="greeting" style="font-size:22px">Today's Plan</div>
+    <div class="date-line">${dateStr}</div>
+
+    <div class="section-title" style="margin-top:20px">Habits Due Today</div>
+    <div class="card">
+      ${recurringDue.length ? recurringDue.map(({ a, goal, stats }) => `
+        <div class="linked-action recurring">
+          <div class="linked-action-left">
+            <button class="check-circle recurring-toggle ${stats.todayDone ? 'done' : ''}" data-toggle-recurring="${a.id}" aria-label="Toggle today">${stats.todayDone ? ICONS.check : ''}</button>
+            <span>${escapeHtml(a.title)}${goal ? `<span class="today-goal-tag">${escapeHtml(goal.title)}</span>` : ''}</span>
+          </div>
+          <span class="status-pill recurring-pill">${stats.rate}%</span>
+        </div>
+      `).join('') : `<div class="empty-state small">No recurring habits scheduled today.</div>`}
+    </div>
+
+    <div class="section-title">Active Actions</div>
+    <div class="card">
+      ${activeOnce.length ? activeOnce.map(({ a, goal }) => `
+        <div class="linked-action">
+          <div class="linked-action-left">
+            <button class="check-circle" data-toggle-action="${a.id}" aria-label="Mark complete"></button>
+            <span>${escapeHtml(a.title)}${goal ? `<span class="today-goal-tag">${escapeHtml(goal.title)}</span>` : ''}</span>
+          </div>
+        </div>
+      `).join('') : `<div class="empty-state small">No active one-time actions right now.</div>`}
+    </div>
+
+    ${dueTodayGoals.length ? `
+      <div class="section-title">Goal Deadlines Today</div>
+      <div class="card">
+        ${dueTodayGoals.map(g => `<div class="analytics-row"><span>${escapeHtml(g.title)}</span><span class="mono">${g.progress}%</span></div>`).join('')}
+      </div>
+    ` : ''}
+
+    <div class="section-title">To-Do</div>
+    <div class="card">
+      ${openTodos.length ? openTodos.map(renderTodoRow).join('') : `<div class="empty-state small">Nothing on your list.</div>`}
+    </div>
+    <button class="add-goal-btn" id="addTodoBtn">${ICONS.plus} Add a to-do</button>
+    ${doneTodos.length ? `
+      <div class="section-title">Completed</div>
+      <div class="card">${doneTodos.map(renderTodoRow).join('')}</div>
+    ` : ''}
+  `;
+}
+
 function renderSystem(state) {
   const s = state.system;
   return `
@@ -589,8 +865,10 @@ function renderSystem(state) {
 
     <div class="section-title">Application</div>
     <div class="card">
+      <div class="system-row"><span>Analytics Report</span><button class="action-link" id="viewAnalyticsBtn">View</button></div>
       <div class="system-row"><span>Firebase connection</span><span class="action-link status-${getStatus()}" id="firebaseStatus">${getStatus() === 'synced' ? 'Synced' : getStatus() === 'error' ? 'Connection error' : 'Connecting…'}</span></div>
       <div class="system-row"><span>Export as Reflection</span><button class="action-link" id="reflectionBtn">Download</button></div>
+      <div class="system-row"><span>Export as Excel (CSV)</span><button class="action-link" id="csvBtn">Download</button></div>
       <div class="system-row"><span>Export data (backup)</span><button class="action-link" id="exportBtn">Download</button></div>
       <div class="system-row"><span>Import data (restore)</span><button class="action-link" id="importBtn">Choose file</button></div>
       <input type="file" id="importFile" accept="application/json" style="display:none">
@@ -602,6 +880,7 @@ function renderSystem(state) {
 /* ---------------- Router ---------------- */
 const SCREENS = {
   home: { render: renderHome, icon: 'home', label: 'Home' },
+  today: { render: renderToday, icon: 'today', label: 'Today' },
   goals: { render: renderGoals, icon: 'goals', label: 'Goals' },
   blueprint: { render: renderBlueprint, icon: 'blueprint', label: 'Blueprint' },
   brain: { render: renderBrain, icon: 'brain', label: 'Brain' },
@@ -622,6 +901,13 @@ function buildShell() {
         <button class="btn-primary" id="gateSignInBtn" style="width:100%;margin-bottom:10px">Sign In</button>
         <button class="btn-secondary" id="gateGuestBtn" style="width:100%">Continue as Guest</button>
       </div>
+    </div>
+    <div class="analytics-overlay" id="analyticsOverlay">
+      <div class="analytics-header">
+        <span class="eyebrow">Analytics Report</span>
+        <button class="icon-btn" id="closeAnalyticsBtn" aria-label="Close">${ICONS.close}</button>
+      </div>
+      <div class="analytics-body" id="analyticsBody"></div>
     </div>
     <div class="topbar">
       <button class="hamburger" id="menuBtn" aria-label="Open menu">
@@ -722,6 +1008,9 @@ function buildShell() {
     openAccountModal('signin');
   });
   document.getElementById('gateGuestBtn').addEventListener('click', () => hideGate(true));
+  document.getElementById('closeAnalyticsBtn').addEventListener('click', () => {
+    document.getElementById('analyticsOverlay').classList.remove('open');
+  });
 }
 
 function switchTab(key) {
@@ -794,19 +1083,95 @@ function wireGenericEditables(container) {
   container.querySelectorAll('.add-list-item[data-list-path]').forEach(btn => {
     btn.addEventListener('click', () => openListAddModal(btn.dataset.listPath, btn.dataset.listLabel || 'item'));
   });
+  container.querySelectorAll('[data-edit-action]').forEach(btn => {
+    btn.addEventListener('click', () => openEditModal('action', btn.dataset.editAction));
+  });
+  container.querySelectorAll('[data-delete-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!confirm('Delete this action?')) return;
+      const s = STORE.state;
+      const a = s.actions.find(a => a.id === btn.dataset.deleteAction);
+      s.actions = s.actions.filter(a => a.id !== btn.dataset.deleteAction);
+      if (a) logChange(s, `Deleted action "${a.title}"`);
+      syncGoalProgress(s);
+      STORE.save(s);
+      renderAll();
+    });
+  });
+  container.querySelectorAll('[data-toggle-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const s = STORE.state;
+      const a = s.actions.find(x => x.id === btn.dataset.toggleAction);
+      if (!a) return;
+      a.status = a.status === 'Completed' ? 'Active' : 'Completed';
+      logChange(s, `${a.title} marked ${a.status}`);
+      syncGoalProgress(s);
+      STORE.save(s);
+      renderAll();
+    });
+  });
+  container.querySelectorAll('[data-toggle-recurring]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const s = STORE.state;
+      const a = s.actions.find(x => x.id === btn.dataset.toggleRecurring);
+      if (!a) return;
+      if (!a.log) a.log = {};
+      const key = todayKey();
+      if (a.log[key]) {
+        delete a.log[key];
+        logChange(s, `${a.title}: today unmarked`);
+      } else {
+        a.log[key] = true;
+        logChange(s, `${a.title}: showed up today`);
+      }
+      syncGoalProgress(s);
+      STORE.save(s);
+      renderAll();
+    });
+  });
+  container.querySelectorAll('[data-toggle-todo]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const s = STORE.state;
+      const t = (s.todos || []).find(t => t.id === btn.dataset.toggleTodo);
+      if (!t) return;
+      t.done = !t.done;
+      logChange(s, `${t.title}: to-do ${t.done ? 'done' : 'reopened'}`);
+      STORE.save(s);
+      renderAll();
+    });
+  });
+  container.querySelectorAll('[data-edit-todo]').forEach(btn => {
+    btn.addEventListener('click', () => openEditModal('todo', btn.dataset.editTodo));
+  });
+  container.querySelectorAll('[data-delete-todo]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!confirm('Delete this to-do?')) return;
+      const s = STORE.state;
+      const t = (s.todos || []).find(t => t.id === btn.dataset.deleteTodo);
+      s.todos = (s.todos || []).filter(t => t.id !== btn.dataset.deleteTodo);
+      if (t) logChange(s, `Deleted to-do "${t.title}"`);
+      STORE.save(s);
+      renderAll();
+    });
+  });
+  container.querySelectorAll('[data-log-lesson]').forEach(btn => {
+    btn.addEventListener('click', () => openLessonModal(btn.dataset.logLesson));
+  });
 }
 
 function attachScreenListeners(key, state) {
   if (key === 'home') {
     const editMissionBtn = document.getElementById('editMissionBtn');
     if (editMissionBtn) editMissionBtn.addEventListener('click', () => openEditModal('mission', null));
-    document.querySelectorAll('[data-edit-action]').forEach(btn => {
-      btn.addEventListener('click', () => openEditModal('action', btn.dataset.editAction));
-    });
     const changeFocusBtn = document.getElementById('changeFocusBtn');
     if (changeFocusBtn) changeFocusBtn.addEventListener('click', openFocusPickModal);
     const snapshotBtn = document.getElementById('snapshotBtn');
     if (snapshotBtn) snapshotBtn.addEventListener('click', () => switchTab('goals'));
+  }
+
+  if (key === 'today') {
+    const addTodoBtn = document.getElementById('addTodoBtn');
+    if (addTodoBtn) addTodoBtn.addEventListener('click', () => openAddModal('todo'));
   }
 
   if (key === 'goals') {
@@ -860,54 +1225,11 @@ function attachScreenListeners(key, state) {
         renderAll();
       });
     });
-    document.querySelectorAll('[data-toggle-action]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const s = STORE.state;
-        const a = s.actions.find(x => x.id === btn.dataset.toggleAction);
-        if (!a) return;
-        a.status = a.status === 'Completed' ? 'Active' : 'Completed';
-        logChange(s, `${a.title} marked ${a.status}`);
-        syncGoalProgress(s);
-        STORE.save(s);
-        renderAll();
-      });
-    });
-    document.querySelectorAll('[data-toggle-recurring]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const s = STORE.state;
-        const a = s.actions.find(x => x.id === btn.dataset.toggleRecurring);
-        if (!a) return;
-        if (!a.log) a.log = {};
-        const key = todayKey();
-        if (a.log[key]) {
-          delete a.log[key];
-          logChange(s, `${a.title}: today unmarked`);
-        } else {
-          a.log[key] = true;
-          logChange(s, `${a.title}: showed up today`);
-        }
-        syncGoalProgress(s);
-        STORE.save(s);
-        renderAll();
-      });
-    });
-    document.querySelectorAll('[data-edit-action]').forEach(btn => {
-      btn.addEventListener('click', () => openEditModal('action', btn.dataset.editAction));
-    });
-    document.querySelectorAll('[data-delete-action]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        if (!confirm('Delete this action?')) return;
-        const s = STORE.state;
-        const a = s.actions.find(a => a.id === btn.dataset.deleteAction);
-        s.actions = s.actions.filter(a => a.id !== btn.dataset.deleteAction);
-        if (a) logChange(s, `Deleted action "${a.title}"`);
-        syncGoalProgress(s);
-        STORE.save(s);
-        renderAll();
-      });
-    });
     document.querySelectorAll('[data-add-action-to]').forEach(btn => {
       btn.addEventListener('click', () => openAddModal('action', btn.dataset.addActionTo));
+    });
+    document.querySelectorAll('[data-add-entry]').forEach(btn => {
+      btn.addEventListener('click', () => openEntryModal(btn.dataset.addEntry));
     });
     const addGoalBtn = document.getElementById('addGoalBtn');
     if (addGoalBtn) addGoalBtn.addEventListener('click', () => openAddModal('goal'));
@@ -946,6 +1268,11 @@ function attachScreenListeners(key, state) {
     const signInRestoreBtn = document.getElementById('signInRestoreBtn');
     if (secureAccountBtn) secureAccountBtn.addEventListener('click', () => openAccountModal('secure'));
     if (signInRestoreBtn) signInRestoreBtn.addEventListener('click', () => openAccountModal('signin'));
+    const viewAnalyticsBtn = document.getElementById('viewAnalyticsBtn');
+    if (viewAnalyticsBtn) viewAnalyticsBtn.addEventListener('click', () => {
+      document.getElementById('analyticsBody').innerHTML = renderAnalytics(STORE.state);
+      document.getElementById('analyticsOverlay').classList.add('open');
+    });
     const signOutBtn = document.getElementById('signOutBtn');
     if (signOutBtn) signOutBtn.addEventListener('click', async () => {
       if (!confirm('Signing out starts a fresh, empty LOS on THIS device. Your real data stays safe in Firestore under your email — sign back in anytime to get it back. Continue?')) return;
@@ -971,6 +1298,15 @@ function attachScreenListeners(key, state) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = 'los-reflection.md'; a.click();
+      URL.revokeObjectURL(url);
+    });
+    const csvBtn = document.getElementById('csvBtn');
+    if (csvBtn) csvBtn.addEventListener('click', () => {
+      const csv = buildCSV(state);
+      const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'los-export.csv'; a.click();
       URL.revokeObjectURL(url);
     });
     if (importBtn && importFile) {
@@ -1008,6 +1344,25 @@ function attachScreenListeners(key, state) {
 }
 
 /* ---------------- Add / Edit modal ---------------- */
+function openLessonModal(goalId) {
+  const state = STORE.state;
+  const g = state.goals.find(g => g.id === goalId);
+  editing = {
+    type: 'note',
+    id: null,
+    prefill: {
+      title: g ? `Lesson: "${g.title}" missed its deadline` : 'Lesson: missed deadline',
+      category: 'Lessons',
+      content: g ? `Deadline was ${formatDate(g.deadline)}. Progress was stuck at ${g.progress}%. What actually got in the way? ` : ''
+    }
+  };
+  document.getElementById('typeRow').style.display = 'none';
+  document.getElementById('modalTitle').textContent = 'Log as Lesson';
+  document.getElementById('deleteFromModal').style.display = 'none';
+  document.getElementById('modalBackdrop').classList.add('open');
+  renderModalFields();
+}
+
 function openAddModal(forceType, presetGoalId) {
   editing = { type: forceType || null, id: null, presetGoalId: presetGoalId || null };
   const typeSelect = document.getElementById('addType');
@@ -1025,6 +1380,7 @@ function openEditModal(type, id) {
   if (type === 'goal') item = state.goals.find(g => g.id === id);
   if (type === 'action') item = state.actions.find(a => a.id === id);
   if (type === 'note') item = state.brain.find(n => n.id === id);
+  if (type === 'todo') item = (state.todos || []).find(t => t.id === id);
   if (type === 'mission') item = { mission: state.home.mission };
 
   editing = { type, id, item };
@@ -1073,6 +1429,15 @@ function accountErrorMessage(err) {
   return 'Something went wrong: ' + (err && err.message ? err.message : 'unknown error');
 }
 
+function openEntryModal(actionId) {
+  editing = { type: 'numericEntry', actionId };
+  document.getElementById('typeRow').style.display = 'none';
+  document.getElementById('modalTitle').textContent = 'Add Entry';
+  document.getElementById('deleteFromModal').style.display = 'none';
+  document.getElementById('modalBackdrop').classList.add('open');
+  renderModalFields();
+}
+
 function openFocusPickModal() {
   editing = { type: 'focuspick' };
   document.getElementById('typeRow').style.display = 'none';
@@ -1111,6 +1476,7 @@ function renderModalFields() {
   } else if (type === 'action') {
     const kind = item ? (item.kind || 'once') : 'once';
     const selDays = item && item.days && item.days.length ? item.days : WEEKDAYS;
+    const endMode = item ? (item.endMode || 'days') : 'days';
     wrap.innerHTML = `
       <label class="field-label">Title</label>
       <input class="field-input" id="f_title" placeholder="What are you doing?" value="${item ? escapeHtml(item.title) : ''}">
@@ -1124,44 +1490,91 @@ function renderModalFields() {
       <select class="field-select" id="f_kind">
         <option value="once" ${kind === 'once' ? 'selected' : ''}>One-time action</option>
         <option value="recurring" ${kind === 'recurring' ? 'selected' : ''}>Recurring (daily habit)</option>
+        <option value="numeric" ${kind === 'numeric' ? 'selected' : ''}>Financial / Number goal</option>
       </select>
-      <div id="onceFields" style="${kind === 'recurring' ? 'display:none' : ''}">
+      <div id="onceFields" style="${kind !== 'once' ? 'display:none' : ''}">
         <label class="field-label">Status</label>
         <select class="field-select" id="f_status">
           ${['Not Started', 'Active', 'Completed'].map(s => `<option ${item && item.status === s ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
       </div>
-      <div id="recurringFields" style="${kind === 'once' ? 'display:none' : ''}">
+      <div id="recurringFields" style="${kind !== 'recurring' ? 'display:none' : ''}">
         <label class="field-label">Repeat on</label>
         <div class="weekday-picker">
           ${WEEKDAYS.map(d => `<button type="button" class="weekday-btn ${selDays.includes(d) ? 'active' : ''}" data-day="${d}">${d[0]}</button>`).join('')}
         </div>
-        <label class="field-label">Duration in days (optional)</label>
-        <input class="field-input" type="number" min="1" id="f_duration" placeholder="e.g. 90" value="${item && item.durationDays ? item.durationDays : ''}">
+        <label class="field-label">Target ends</label>
+        <select class="field-select" id="f_endmode">
+          <option value="days" ${endMode === 'days' ? 'selected' : ''}>Number of days</option>
+          <option value="custom" ${endMode === 'custom' ? 'selected' : ''}>Custom end date</option>
+          <option value="goalDeadline" ${endMode === 'goalDeadline' ? 'selected' : ''}>Same as goal's deadline</option>
+        </select>
+        <div id="endDaysField" style="${endMode !== 'days' ? 'display:none' : ''}">
+          <label class="field-label">Duration in days</label>
+          <input class="field-input" type="number" min="1" id="f_duration" placeholder="e.g. 90" value="${item && item.durationDays ? item.durationDays : ''}">
+        </div>
+        <div id="endCustomField" style="${endMode !== 'custom' ? 'display:none' : ''}">
+          <label class="field-label">End date</label>
+          <input class="field-input" type="date" id="f_enddate" value="${item && item.endDate ? item.endDate : ''}">
+        </div>
+        <div id="endGoalField" style="${endMode !== 'goalDeadline' ? 'display:none' : ''}">
+          <div class="goal-why" style="margin-bottom:14px">Uses whatever deadline is set on the linked goal above \u2014 edit the goal separately to change it.</div>
+        </div>
+      </div>
+      <div id="numericFields" style="${kind !== 'numeric' ? 'display:none' : ''}">
+        <label class="field-label">Unit</label>
+        <select class="field-select" id="f_unit">
+          <option value="currency" ${(!item || item.unit === 'currency') ? 'selected' : ''}>\u20b9 Rupees</option>
+          <option value="number" ${item && item.unit === 'number' ? 'selected' : ''}>Plain number</option>
+        </select>
+        <label class="field-label">Target</label>
+        <input class="field-input" type="number" id="f_target" placeholder="e.g. 200000" value="${item && item.target ? item.target : ''}">
+        ${!item ? `
+          <label class="field-label">Starting amount (optional)</label>
+          <input class="field-input" type="number" id="f_starting" placeholder="Already have some saved? Enter it here">
+        ` : `
+          <div class="goal-why" style="margin-bottom:14px">This only changes the target. Use "Add entry" on the action itself to update how much you've actually reached.</div>
+        `}
       </div>
     `;
     const kindSelect = wrap.querySelector('#f_kind');
     kindSelect.addEventListener('change', () => {
-      const isRecurring = kindSelect.value === 'recurring';
-      wrap.querySelector('#onceFields').style.display = isRecurring ? 'none' : 'block';
-      wrap.querySelector('#recurringFields').style.display = isRecurring ? 'block' : 'none';
+      const v = kindSelect.value;
+      wrap.querySelector('#onceFields').style.display = v === 'once' ? 'block' : 'none';
+      wrap.querySelector('#recurringFields').style.display = v === 'recurring' ? 'block' : 'none';
+      wrap.querySelector('#numericFields').style.display = v === 'numeric' ? 'block' : 'none';
     });
     wrap.querySelectorAll('.weekday-btn').forEach(btn => {
       btn.addEventListener('click', () => btn.classList.toggle('active'));
     });
+    const endModeSelect = wrap.querySelector('#f_endmode');
+    endModeSelect.addEventListener('change', () => {
+      const mode = endModeSelect.value;
+      wrap.querySelector('#endDaysField').style.display = mode === 'days' ? 'block' : 'none';
+      wrap.querySelector('#endCustomField').style.display = mode === 'custom' ? 'block' : 'none';
+      wrap.querySelector('#endGoalField').style.display = mode === 'goalDeadline' ? 'block' : 'none';
+    });
   } else if (type === 'note') {
+    const prefill = editing.prefill || {};
     wrap.innerHTML = `
       <label class="field-label">Title</label>
-      <input class="field-input" id="f_title" placeholder="Note title" value="${item ? escapeHtml(item.title) : ''}">
+      <input class="field-input" id="f_title" placeholder="Note title" value="${item ? escapeHtml(item.title) : escapeHtml(prefill.title || '')}">
       <label class="field-label">Category</label>
-      <input class="field-input" id="f_category" placeholder="Ideas, Books, AI, Business..." value="${item ? escapeHtml(item.category) : ''}">
+      <input class="field-input" id="f_category" placeholder="Ideas, Books, AI, Business..." value="${item ? escapeHtml(item.category) : escapeHtml(prefill.category || '')}">
       <label class="field-label">Content</label>
-      <textarea class="field-textarea" id="f_content" placeholder="What did you learn?">${item ? escapeHtml(item.content) : ''}</textarea>
+      <textarea class="field-textarea" id="f_content" placeholder="What did you learn?">${item ? escapeHtml(item.content) : escapeHtml(prefill.content || '')}</textarea>
     `;
   } else if (type === 'mission') {
     wrap.innerHTML = `
       <label class="field-label">Today's Mission</label>
       <textarea class="field-textarea" id="f_mission" placeholder="What matters most today?">${item ? escapeHtml(item.mission) : ''}</textarea>
+    `;
+  } else if (type === 'todo') {
+    wrap.innerHTML = `
+      <label class="field-label">Title</label>
+      <input class="field-input" id="f_title" placeholder="What needs doing?" value="${item ? escapeHtml(item.title) : ''}">
+      <label class="field-label">Due date (optional)</label>
+      <input class="field-input" type="date" id="f_duedate" value="${item && item.dueDate ? item.dueDate : ''}">
     `;
   } else if (type === 'field') {
     wrap.innerHTML = `
@@ -1198,6 +1611,13 @@ function renderModalFields() {
         renderAll();
       });
     });
+  } else if (type === 'numericEntry') {
+    wrap.innerHTML = `
+      <label class="field-label">Amount</label>
+      <input class="field-input" type="number" id="f_amount" placeholder="e.g. 1267 (use a minus sign to subtract)">
+      <label class="field-label">Note (optional)</label>
+      <input class="field-input" id="f_note" placeholder="e.g. Client payment">
+    `;
   } else if (type === 'secure-account') {
     wrap.innerHTML = `
       <div class="goal-why" style="margin-bottom:14px">This links an email + password to your existing data \u2014 nothing is lost or reset.</div>
@@ -1277,6 +1697,26 @@ async function saveModal() {
     return;
   }
 
+  if (type === 'numericEntry') {
+    const amount = parseFloat(document.getElementById('f_amount').value);
+    if (isNaN(amount) || amount === 0) {
+      alert('Enter a non-zero amount.');
+      return;
+    }
+    const note = document.getElementById('f_note').value.trim();
+    const a = state.actions.find(a => a.id === editing.actionId);
+    if (a) {
+      if (!a.ledger) a.ledger = [];
+      a.ledger.push({ amount, note, ts: Date.now() });
+      logChange(state, `${a.title}: ${amount >= 0 ? '+' : ''}${formatNumeric(amount, a.unit)}`);
+    }
+    syncGoalProgress(state);
+    STORE.save(state);
+    closeModal();
+    renderAll();
+    return;
+  }
+
   if (type === 'mission') {
     state.home.mission = document.getElementById('f_mission').value.trim() || state.home.mission;
     logChange(state, "Updated Today's Mission");
@@ -1310,11 +1750,17 @@ async function saveModal() {
       a.title = title; a.why = why; a.goalId = goalId; a.kind = kind;
       if (kind === 'recurring') {
         const days = Array.from(document.querySelectorAll('.weekday-btn.active')).map(b => b.dataset.day);
-        const durationVal = document.getElementById('f_duration').value;
+        const endMode = document.getElementById('f_endmode').value;
         a.days = days.length ? days : WEEKDAYS;
-        a.durationDays = durationVal ? parseInt(durationVal, 10) : null;
+        a.endMode = endMode;
+        a.durationDays = endMode === 'days' ? (parseInt(document.getElementById('f_duration').value, 10) || null) : null;
+        a.endDate = endMode === 'custom' ? (document.getElementById('f_enddate').value || null) : null;
         if (!a.log) a.log = {};
         if (!a.startDate) a.startDate = todayKey();
+      } else if (kind === 'numeric') {
+        a.unit = document.getElementById('f_unit').value;
+        a.target = parseFloat(document.getElementById('f_target').value) || 0;
+        if (!a.ledger) a.ledger = [];
       } else {
         a.status = document.getElementById('f_status').value;
       }
@@ -1323,12 +1769,19 @@ async function saveModal() {
       const newAction = { id: 'a' + Date.now(), title, why, goalId, kind };
       if (kind === 'recurring') {
         const days = Array.from(document.querySelectorAll('.weekday-btn.active')).map(b => b.dataset.day);
-        const durationVal = document.getElementById('f_duration').value;
+        const endMode = document.getElementById('f_endmode').value;
         newAction.days = days.length ? days : WEEKDAYS;
-        newAction.durationDays = durationVal ? parseInt(durationVal, 10) : null;
+        newAction.endMode = endMode;
+        newAction.durationDays = endMode === 'days' ? (parseInt(document.getElementById('f_duration').value, 10) || null) : null;
+        newAction.endDate = endMode === 'custom' ? (document.getElementById('f_enddate').value || null) : null;
         newAction.startDate = todayKey();
         newAction.log = {};
         newAction.status = 'Active';
+      } else if (kind === 'numeric') {
+        newAction.unit = document.getElementById('f_unit').value;
+        newAction.target = parseFloat(document.getElementById('f_target').value) || 0;
+        const starting = parseFloat(document.getElementById('f_starting').value);
+        newAction.ledger = starting ? [{ amount: starting, note: 'Starting amount', ts: Date.now() }] : [];
       } else {
         newAction.status = document.getElementById('f_status').value;
       }
@@ -1345,6 +1798,17 @@ async function saveModal() {
     } else {
       state.brain.push({ id: 'b' + Date.now(), title, category, content });
       logChange(state, `Added note "${title}"`);
+    }
+  } else if (type === 'todo') {
+    const dueDate = document.getElementById('f_duedate').value || '';
+    if (!Array.isArray(state.todos)) state.todos = [];
+    if (editing.id) {
+      const t = state.todos.find(t => t.id === editing.id);
+      t.title = title; t.dueDate = dueDate;
+      logChange(state, `Updated to-do "${title}"`);
+    } else {
+      state.todos.push({ id: 't' + Date.now(), title, dueDate, done: false });
+      logChange(state, `Added to-do "${title}"`);
     }
   }
 
@@ -1372,6 +1836,11 @@ function deleteFromModal() {
     const n = state.brain.find(n => n.id === editing.id);
     state.brain = state.brain.filter(n => n.id !== editing.id);
     if (n) logChange(state, `Deleted note "${n.title}"`);
+  }
+  if (editing.type === 'todo') {
+    const t = (state.todos || []).find(t => t.id === editing.id);
+    state.todos = (state.todos || []).filter(t => t.id !== editing.id);
+    if (t) logChange(state, `Deleted to-do "${t.title}"`);
   }
   syncGoalProgress(state);
   STORE.save(state);

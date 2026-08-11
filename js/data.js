@@ -131,6 +131,7 @@ const SEED = {
     reflection: "Progress is created through consistent action, not perfect planning.",
     quickReminder: "When confused, return to the mission."
   },
+  todos: [],
   meta: { lastOpened: null, recentChanges: [] }
 };
 
@@ -151,9 +152,26 @@ function migrate(parsed) {
   if (Array.isArray(parsed.actions)) {
     parsed.actions.forEach(a => {
       if (!a.kind) a.kind = 'once';
+      if (a.kind === 'recurring' && !a.endMode) a.endMode = 'days';
+      if (a.kind === 'numeric' && !a.ledger) a.ledger = [];
     });
   }
+  if (!Array.isArray(parsed.todos)) parsed.todos = [];
   return parsed;
+}
+
+const QUICK_KEY = 'los_quickcache';
+
+function loadQuickCache() {
+  try {
+    const raw = localStorage.getItem(QUICK_KEY);
+    if (raw) return migrate(JSON.parse(raw));
+  } catch (e) { /* ignore — falls back to SEED */ }
+  return null;
+}
+
+function saveQuickCache(state) {
+  try { localStorage.setItem(QUICK_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
 }
 
 function load() {
@@ -162,6 +180,7 @@ function load() {
 
 function save(state) {
   _cache = state;
+  saveQuickCache(state);
   if (_docRef) {
     setDoc(_docRef, state).catch(e => console.error('LOS Firestore save failed', e));
   }
@@ -169,10 +188,11 @@ function save(state) {
 }
 
 /* ---------------- Firestore live sync ---------------- */
-// Local cache the UI reads/writes synchronously. Starts as SEED so the app
-// renders instantly; gets replaced the moment Firestore responds (near-
-// instant on repeat visits thanks to persistentLocalCache above).
-let _cache = structuredClone(SEED);
+// Local cache the UI reads/writes synchronously. Seeded from a localStorage
+// mirror if one exists (instant, accurate, works offline) — falls back to
+// SEED only on a genuinely first-ever open. Firestore's onSnapshot then
+// confirms/corrects it, near-instantly thanks to persistentLocalCache above.
+let _cache = loadQuickCache() || structuredClone(SEED);
 let _docRef = null;
 let _status = 'connecting';
 let _authReady = false;
@@ -226,6 +246,7 @@ async function bootstrapAuth() {
         _cache = structuredClone(SEED);
         setDoc(_docRef, _cache).catch(e => console.error('LOS Firestore seed failed', e));
       }
+      saveQuickCache(_cache);
       _status = 'synced';
       afterSync();
     }, (e) => {
@@ -263,6 +284,7 @@ async function signInToRestore(email, password) {
 }
 
 async function signOutAccount() {
+  try { localStorage.removeItem(QUICK_KEY); } catch (e) { /* ignore */ }
   await signOut(auth);
   // onAuthStateChanged fires with user=null, which auto-starts a fresh
   // anonymous session — this device gets an empty LOS until someone
@@ -276,6 +298,7 @@ const STORE = {
   save,
   reset() {
     _cache = structuredClone(SEED);
+    saveQuickCache(_cache);
     if (_docRef) setDoc(_docRef, _cache).catch(e => console.error('LOS Firestore reset failed', e));
   }
 };

@@ -511,6 +511,9 @@ button {
   padding-left: 32px;
   margin-bottom: 4px;
 }
+.recurring-stats .stat-done { color: var(--primary); font-weight: 600; }
+.recurring-stats .stat-missed { color: var(--danger); font-weight: 600; }
+.recurring-stats .stat-sep { margin: 0 5px; opacity: 0.5; }
 .recurring-strip {
   display: flex;
   gap: 3px;
@@ -525,6 +528,61 @@ button {
 }
 .strip-dot.done { background: var(--primary); }
 .strip-dot.missed { background: var(--danger); opacity: 0.6; }
+
+.ledger-history {
+  padding-left: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
+}
+.ledger-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.ledger-pos { color: var(--primary); font-weight: 600; }
+.ledger-neg { color: var(--danger); font-weight: 600; }
+.ledger-note { color: var(--muted); flex: 1; }
+.ledger-date { color: var(--muted); font-size: 10.5px; flex-shrink: 0; }
+
+.today-goal-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  vertical-align: middle;
+}
+.todo-due { color: var(--muted); font-size: 11px; }
+.todo-overdue { color: var(--danger); font-weight: 600; }
+
+.overdue-banner {
+  background: var(--danger-soft);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.overdue-banner-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.overdue-btn {
+  flex: 1;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.08);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+.overdue-btn:active { background: rgba(255,255,255,0.15); }
 
 .status-pill.recurring-pill {
   background: var(--primary-soft);
@@ -857,6 +915,49 @@ button:focus-visible, .stepper-btn:focus-visible, .drawer-item:focus-visible, .h
 }
 
 /* ---------- Modal (quick add) ---------- */
+/* ---------------- Analytics overlay ---------------- */
+.analytics-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: none;
+  flex-direction: column;
+  z-index: 58;
+}
+.analytics-overlay.open { display: flex; }
+.analytics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.analytics-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 20px 40px;
+}
+.analytics-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13.5px;
+}
+.analytics-row:last-child { border-bottom: none; }
+.analytics-goal {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.analytics-goal:last-child { border-bottom: none; }
+.analytics-goal-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13.5px;
+  margin-bottom: 6px;
+}
+
 /* ---------------- Auth gate ---------------- */
 .auth-gate {
   position: fixed;
